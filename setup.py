@@ -1,14 +1,14 @@
 from setuptools import (
     setup,
     find_packages,
-    )
+)
 
 
 install_requires = [
     'elasticsearch',
-    'elasticsearch-dsl',
+    'elasticsearch-dsl==0.0.8',
     'nefertari',
-    ]
+]
 
 
 setup(
@@ -35,4 +35,8 @@ setup(
     include_package_data=True,
     zip_safe=False,
     install_requires=install_requires,
+    entry_points="""\
+    [console_scripts]
+        nefertari_es.index = nefertari_es.scripts.index:main
+    """,
 )

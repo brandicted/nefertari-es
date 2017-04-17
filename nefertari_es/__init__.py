@@ -6,12 +6,17 @@ from nefertari.utils import (
     split_strip,
 )
 from .documents import BaseDocument
-from .serializers import JSONSerializer
+from .serializers import get_json_serializer
 from .connections import ESHttpConnection
 from .meta import (
     get_document_cls,
     get_document_classes,
     create_index,
+)
+from .utils import (
+    is_relationship_field,
+    get_relationship_cls,
+    relationship_fields,
 )
 from .fields import (
     IdField,
@@ -40,6 +45,8 @@ from .fields import (
     PickleField,
 )
 
+from nefertari.engine.common import JSONEncoder
+
 
 __all__ = [
     'BaseDocument',
@@ -67,6 +74,8 @@ __all__ = [
     'get_document_classes',
     'is_relationship_field',
     'get_relationship_cls',
+    'relationship_fields',
+    'JSONEncoder',
 
     'ListField',
     'ForeignKeyField',
@@ -75,42 +84,42 @@ __all__ = [
 ]
 
 
+ESSettings = dictset()
 Settings = dictset()
 
 
 def includeme(config):
-    pass
+    config.include('nefertari_es.sync_handlers')
+    Settings.update(dictset(config.registry.settings))
+    ESSettings.update(Settings.mget('elasticsearch'))
 
 
-def setup_database(config):
-    settings = dictset(config.registry.settings).mget('elasticsearch')
-    Settings.update(settings)
+def setup_database(config, setup_polymorphic=True):
     params = {}
-    params['chunk_size'] = settings.get('chunk_size', 500)
+    params['chunk_size'] = ESSettings.get('chunk_size', 500)
     params['hosts'] = []
-    for hp in split_strip(settings['hosts']):
+    for hp in split_strip(ESSettings['hosts']):
         h, p = split_strip(hp, ':')
         params['hosts'].append(dict(host=h, port=p))
-    if settings.asbool('sniff'):
+    if ESSettings.asbool('sniff'):
         params['sniff_on_start'] = True
         params['sniff_on_connection_fail'] = True
 
-    # XXX if this connection has to deal with mongo and sqla objects,
-    # then we'll need to use their es serializers instead. should
-    # probably clean up that part of the engine interface - there's
-    # lots of repeated code, plus other engines shouldn't have to know
-    # about es - they should just know how to serialize their
-    # documents to JSON.
+    serializer_cls = get_json_serializer()
     conn = es_connections.create_connection(
-        serializer=JSONSerializer(),
+        serializer=serializer_cls(),
         connection_class=ESHttpConnection,
         **params)
-    setup_index(conn, settings)
+    setup_index(conn)
+
+    if setup_polymorphic:
+        if ESSettings.asbool('enable_polymorphic_query'):
+            config.include('nefertari_es.polymorphic')
 
 
-def setup_index(conn, settings):
+def setup_index(conn):
     from nefertari.json_httpexceptions import JHTTPNotFound
-    index_name = settings['index_name']
+    index_name = ESSettings['index_name']
     try:
         index_exists = conn.indices.exists([index_name])
     except JHTTPNotFound:
@@ -120,12 +129,3 @@ def setup_index(conn, settings):
     else:
         for doc_cls in get_document_classes().values():
             doc_cls._doc_type.index = index_name
-
-
-def is_relationship_field(field, model_cls):
-    return field in model_cls._relationships()
-
-
-def get_relationship_cls(field, model_cls):
-    field_obj = model_cls._doc_type.mapping[field]
-    return field_obj._doc_class
