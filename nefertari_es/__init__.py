@@ -6,12 +6,17 @@ from nefertari.utils import (
     split_strip,
 )
 from .documents import BaseDocument
-from .serializers import JSONSerializer
+from .serializers import get_json_serializer
 from .connections import ESHttpConnection
 from .meta import (
     get_document_cls,
     get_document_classes,
     create_index,
+)
+from .utils import (
+    is_relationship_field,
+    get_relationship_cls,
+    relationship_fields,
 )
 from .fields import (
     IdField,
@@ -40,6 +45,8 @@ from .fields import (
     PickleField,
 )
 
+from nefertari.engine.common import JSONEncoder
+
 
 __all__ = [
     'BaseDocument',
@@ -67,6 +74,8 @@ __all__ = [
     'get_document_classes',
     'is_relationship_field',
     'get_relationship_cls',
+    'relationship_fields',
+    'JSONEncoder',
 
     'ListField',
     'ForeignKeyField',
@@ -79,7 +88,7 @@ Settings = dictset()
 
 
 def includeme(config):
-    pass
+    config.include('nefertari_es.sync_handlers')
 
 
 def setup_database(config):
@@ -101,8 +110,9 @@ def setup_database(config):
     # lots of repeated code, plus other engines shouldn't have to know
     # about es - they should just know how to serialize their
     # documents to JSON.
+    serializer_cls = get_json_serializer()
     conn = es_connections.create_connection(
-        serializer=JSONSerializer(),
+        serializer=serializer_cls(),
         connection_class=ESHttpConnection,
         **params)
     setup_index(conn, settings)
@@ -120,12 +130,3 @@ def setup_index(conn, settings):
     else:
         for doc_cls in get_document_classes().values():
             doc_cls._doc_type.index = index_name
-
-
-def is_relationship_field(field, model_cls):
-    return field in model_cls._relationships()
-
-
-def get_relationship_cls(field, model_cls):
-    field_obj = model_cls._doc_type.mapping[field]
-    return field_obj._doc_class
