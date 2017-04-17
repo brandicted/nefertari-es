@@ -229,12 +229,12 @@ class TestIdField(object):
             d.id = 'fail'
         assert str(e.value) == 'id is read-only'
 
-    def test_sync_id(self, id_model):
+    def test_populate_id_field(self, id_model):
         d = id_model()
         assert d.id is None
 
         # simulate a save
         d._id = 'ID'
-        d._sync_id_field()
+        d._populate_id_field()
 
         assert d.id == d._id
