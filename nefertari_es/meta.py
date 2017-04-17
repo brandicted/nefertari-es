@@ -3,6 +3,7 @@ import inspect
 from elasticsearch_dsl import Index
 from elasticsearch_dsl.document import DocTypeMeta as ESDocTypeMeta
 from elasticsearch_dsl.field import Field
+from nefertari.engine.common import MultiEngineMeta
 
 # BaseDocument subclasses registry
 # maps class names to classes
@@ -64,19 +65,33 @@ class NonDocumentInheritanceMixin(type):
     fields.
     """
     def __new__(cls, name, bases, attrs):
+        """ Override to fix errors on when inheriting non-doctype.
+
+        Im particular:
+          * Check for all Field instances, move them to mapping and
+            replace attributes with descriptor that raises
+            AttributeError.
+          * Replace all attributes that have names of mapping fields
+            with descriptor that raises AttributeError.
+        """
         new_cls = super(NonDocumentInheritanceMixin, cls).__new__(
             cls, name, bases, attrs)
         mapping = new_cls._doc_type.mapping
 
-        class AttributeErrorDescriptor(object):
+        class AttrErrorDescriptor(object):
             def __get__(self, *args, **kwargs):
                 raise AttributeError
+
         for name, member in inspect.getmembers(new_cls):
             if name.startswith('__') or name in mapping:
                 continue
             if isinstance(member, Field):
                 mapping.field(name, member)
-                setattr(new_cls, name, AttributeErrorDescriptor())
+                setattr(new_cls, name, AttrErrorDescriptor())
+
+        for name in mapping:
+            if hasattr(new_cls, name):
+                setattr(new_cls, name, AttrErrorDescriptor())
 
         return new_cls
 
@@ -99,6 +114,7 @@ class BackrefGeneratingDocMixin(type):
             backref_kwargs.setdefault('uselist', False)
             backref_field = Relationship(
                 new_class.__name__, **backref_kwargs)
+            backref_field._is_backref = True
             backref_field._back_populates = name
             target_cls._doc_type.mapping.field(field_name, backref_field)
             field._back_populates = field_name
@@ -107,8 +123,13 @@ class BackrefGeneratingDocMixin(type):
 
 
 class GenerateMetaMixin(type):
-    """ Metaclass mixin that generates Meta class attribute. """
+    """ Metaclass mixin that generates Meta class attribute.
+
+    Also restores '__abstract__' param to default ``False`` if not
+    explicitly defined.
+    """
     def __new__(cls, name, bases, attrs):
+        attrs.setdefault('__abstract__', False)
         if 'Meta' not in attrs:
 
             class Meta(object):
@@ -124,5 +145,6 @@ class DocTypeMeta(
         NonDocumentInheritanceMixin,
         RegisteredDocMixin,
         BackrefGeneratingDocMixin,
+        MultiEngineMeta,
         ESDocTypeMeta):
     pass

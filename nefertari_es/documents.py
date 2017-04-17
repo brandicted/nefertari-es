@@ -18,11 +18,14 @@ from nefertari.utils import (
     dictset,
     split_strip,
 )
+from nefertari.engine.common import MultiEngineDocMixin
+
 from .meta import DocTypeMeta
 from .fields import (
     ReferenceField, IdField, DictField, ListField,
-    IntegerField,
+    IntegerField, Relationship
 )
+from .utils import relationship_fields
 
 
 class SyncRelatedMixin(object):
@@ -46,6 +49,13 @@ class SyncRelatedMixin(object):
 
     def __setattr__(self, name, value):
         if name in self._relationships():
+
+            # Load new value from db
+            data = {name: value}
+            self._load_related(name, container=data)
+            value = data[name]
+
+            # Load existing data from db
             self._load_related(name)
             self._sync_related(
                 new_value=value,
@@ -169,9 +179,8 @@ class VersionedMixin(object):
         return name
 
 
-class BaseDocument(with_metaclass(
-        DocTypeMeta,
-        VersionedMixin, SyncRelatedMixin, DocType)):
+class BaseMixin(object):
+    _sync_events = None
     _public_fields = None
     _auth_fields = None
     _hidden_fields = None
@@ -180,8 +189,8 @@ class BaseDocument(with_metaclass(
     _request = None
 
     def __init__(self, *args, **kwargs):
-        super(BaseDocument, self).__init__(*args, **kwargs)
-        self._sync_id_field()
+        super(BaseMixin, self).__init__(*args, **kwargs)
+        self._populate_id_field()
 
     def __eq__(self, other):
         if isinstance(other, self.__class__):
@@ -190,7 +199,7 @@ class BaseDocument(with_metaclass(
             other_pk = getattr(other, pk_field, None)
             return (self_pk is not None and other_pk is not None
                     and self_pk == other_pk)
-        return super(BaseDocument, self).__eq__(other)
+        return super(BaseMixin, self).__eq__(other)
 
     def __ne__(self, other):
         return not self.__eq__(other)
@@ -200,7 +209,7 @@ class BaseDocument(with_metaclass(
         pk_field = self.pk_field()
         pk = getattr(self, pk_field, None)
         if pk is None:
-            self._sync_id_field()
+            self._populate_id_field()
             pk = getattr(self, pk_field, None)
             if pk is None:
                 return None
@@ -211,8 +220,14 @@ class BaseDocument(with_metaclass(
 
         return _hasher
 
-    def _sync_id_field(self):
-        """ Copy meta["_id"] to IdField. """
+    def _populate_meta_id(self):
+        """ Copy PK field value to meta["id"]. """
+        pk_value = getattr(self, self.pk_field(), None)
+        if pk_value not in (None, ''):
+            self.meta['id'] = pk_value
+
+    def _populate_id_field(self):
+        """ Copy meta["id"] to IdField. """
         if self.pk_field_type() is IdField:
             pk_field = self.pk_field()
             if not getattr(self, pk_field, None) and self._id is not None:
@@ -221,14 +236,14 @@ class BaseDocument(with_metaclass(
     def __setattr__(self, name, value):
         if name == self.pk_field() and self.pk_field_type() == IdField:
             raise AttributeError('{} is read-only'.format(self.pk_field()))
-        super(BaseDocument, self).__setattr__(name, value)
+        super(BaseMixin, self).__setattr__(name, value)
 
     def __getattr__(self, name):
         if name == '_id' and 'id' not in self.meta:
             return None
         if name in self._relationships():
             self._load_related(name)
-        return super(BaseDocument, self).__getattr__(name)
+        return super(BaseMixin, self).__getattr__(name)
 
     def __repr__(self):
         parts = ['%s:' % self.__class__.__name__]
@@ -256,8 +271,11 @@ class BaseDocument(with_metaclass(
             if items:
                 self._d_[field_name] = items if field._multi else items[0]
 
-    def _load_related(self, field_name):
-        value = field_name in self._d_ and self._d_[field_name]
+    def _load_related(self, field_name, container=None):
+        if container is None:
+            container = self._d_
+
+        value = field_name in container and container[field_name]
         if not value:
             return
 
@@ -268,37 +286,10 @@ class BaseDocument(with_metaclass(
 
         if not isinstance(value[0], doc_cls):
             pk_field = doc_cls.pk_field()
-            items = doc_cls.get_collection(**{pk_field: value})
+            items = doc_cls.get_collection(
+                **{pk_field: value, '_query_secondary': False})
             if items:
-                self._d_[field_name] = items if field._multi else items[0]
-
-    def save(self, request=None, refresh=True, **kwargs):
-        super(BaseDocument, self).save(refresh=refresh, **kwargs)
-        self._sync_id_field()
-        return self
-
-    def update(self, params, **kw):
-        process_bools(params)
-        _validate_fields(self.__class__, params.keys())
-        pk_field = self.pk_field()
-
-        iter_types = (DictField, ListField)
-        iter_fields = [
-            field for field in self._doc_type.mapping
-            if isinstance(self._doc_type.mapping[field], iter_types)]
-
-        for key, value in params.items():
-            if key == pk_field:
-                continue
-            if key in iter_fields:
-                self.update_iterables(value, key, unique=True, save=False)
-            else:
-                setattr(self, key, value)
-
-        return self.save(**kw)
-
-    def delete(self, request=None):
-        super(BaseDocument, self).delete()
+                container[field_name] = items if field._multi else items[0]
 
     def to_dict(self, include_meta=False, _keys=None, request=None,
                 _depth=None):
@@ -337,7 +328,7 @@ class BaseDocument(with_metaclass(
                     except AttributeError:
                         continue
 
-        data = super(BaseDocument, self).to_dict(include_meta=include_meta)
+        data = super(BaseMixin, self).to_dict(include_meta=include_meta)
         data = {key: val for key, val in data.items()
                 if not key.startswith('__')}
 
@@ -360,6 +351,34 @@ class BaseDocument(with_metaclass(
             else:
                 params[name] = getattr(inst, pk_field, inst)
         return params
+
+    @classmethod
+    def _get_fields_creators(cls):
+        """ Return map of field creator classes/functions.
+
+        Map consists of:
+            field name: String name of a field
+            field creator: Class/func that may be run to create new
+                instance of such field. Note that these are classes that
+                create fields, not classes of created fields. E.g.
+                "Relationship" func instead of "ReferenceField".
+
+        Does not return backref relationship fields.
+        """
+        fields = {name: cls._doc_type.mapping[name]
+                  for name in cls._doc_type.mapping}
+
+        backrefs = [
+            key for key, val in fields.items()
+            if (isinstance(val, relationship_fields) and
+                getattr(val, '_is_backref', False))]
+        fields = {key: type(val) for key, val in fields.items()}
+        for key in fields:
+            if fields[key] in relationship_fields:
+                fields[key] = Relationship
+        for name in backrefs:
+            fields.pop(name, None)
+        return fields
 
     @classmethod
     def _relationships(cls):
@@ -391,38 +410,40 @@ class BaseDocument(with_metaclass(
         :returns: Single collection item as an instance of ``cls``.
         """
         kw.setdefault('_raise_on_empty', True)
-        result = cls.get_collection(_limit=1, _item_request=True, **kw)
-        return result[0]
+        items = cls.get_collection(_limit=1, _item_request=True, **kw)
+        return items[0]
 
     @classmethod
     def _update_many(cls, items, params, request=None):
-        params = cls._flatten_relationships(params)
-        if not items:
-            return
-
-        actions = [item.to_dict(include_meta=True) for item in items]
-        actions_count = len(actions)
-        for action in actions:
-            action.pop('_source')
-            action['doc'] = params
-        client = items[0].connection
-        operation = partial(
-            _bulk,
-            client=client, op_type='update', request=request)
-        _perform_in_chunks(actions, operation)
-        return actions_count
+        return cls._bulk_operation(items, 'update', request, params)
 
     @classmethod
     def _delete_many(cls, items, request=None):
+        return cls._bulk_operation(items, 'delete', request)
+
+    @classmethod
+    def _index_many(cls, items, request=None):
+        return cls._bulk_operation(items, 'index', request)
+
+    @classmethod
+    def _bulk_operation(cls, items, op_type, request=None, params=None):
+        if params is not None:
+            params = cls._flatten_relationships(params)
+
         if not items:
             return
 
         actions = [item.to_dict(include_meta=True) for item in items]
         actions_count = len(actions)
+        if params is not None:
+            for action in actions:
+                action.pop('_source')
+                action['doc'] = params
+
         client = items[0].connection
         operation = partial(
             _bulk,
-            client=client, op_type='delete', request=request)
+            client=client, op_type=op_type, request=request)
         _perform_in_chunks(actions, operation)
         return actions_count
 
@@ -431,7 +452,7 @@ class BaseDocument(with_metaclass(
                        _fields=None, _limit=None, _page=None, _start=None,
                        _query_set=None, _item_request=False, _explain=None,
                        _search_fields=None, q=None, _raise_on_empty=False,
-                       **params):
+                       search_obj=None, **params):
         """ Query collection and return results.
 
         Notes:
@@ -484,6 +505,8 @@ class BaseDocument(with_metaclass(
         :param _search_fields: Coma-separated list of field names to use
             with full-text search(q param) to limit fields which are
             searched.
+        :param search_obj: Instance of elasticsearch_dsl.Search which
+            should be used instead of creating new one with cls.search().
 
         :returns: Query results. May be sorted, offset, limited.
         :returns: Dict of {'field_name': fieldval}, when ``_fields`` param
@@ -505,7 +528,9 @@ class BaseDocument(with_metaclass(
             or ``sqlalchemy.exc.IntegrityError`` errors happen during DB
             query.
         """
-        search_obj = cls.search()
+        search_passed = search_obj is not None
+        if not search_passed:
+            search_obj = cls.search()
 
         if _limit is not None:
             _start, limit = process_limit(_start, _page, _limit)
@@ -513,15 +538,21 @@ class BaseDocument(with_metaclass(
 
         if _fields:
             include, exclude = process_fields(_fields)
-            if _strict:
+            if _strict and not search_passed:
                 _validate_fields(cls, include + exclude)
             # XXX partial fields support isn't yet released. for now
             # we just use fields, later we'll add support for excluded fields
             search_obj = search_obj.fields(include)
 
         if params:
-            params = _cleaned_query_params(cls, params, _strict)
-            params = _restructure_params(cls, params)
+            params = {key: val for key, val in params.items()
+                      if not key.startswith('__') and val != '_all'}
+            # process_lists(params)
+            process_bools(params)
+            if not search_passed:
+                params = _clean_query_params(cls, params, _strict)
+                params = _rename_pk_param(cls, params)
+            params = _restructure_params(params)
             if params:
                 search_obj = search_obj.filter('terms', **params)
 
@@ -539,10 +570,10 @@ class BaseDocument(with_metaclass(
 
         if _sort:
             sort_fields = split_strip(_sort)
-            if _strict:
-                _validate_fields(
-                    cls,
-                    [f[1:] if f.startswith('-') else f for f in sort_fields])
+            if _strict and not search_passed:
+                clean_fields = [f[1:] if f.startswith('-') else f
+                                for f in sort_fields]
+                _validate_fields(cls, clean_fields)
             search_obj = search_obj.sort(*sort_fields)
 
         hits = search_obj.execute().hits
@@ -583,12 +614,14 @@ class BaseDocument(with_metaclass(
         return field in cls._doc_type.mapping
 
     @classmethod
-    def get_or_create(cls, **params):
+    def get_or_create(cls, request=None, **params):
         defaults = params.pop('defaults', {})
-        items = cls.get_collection(_raise_on_empty=False, **params)
+        items = cls.get_collection(
+            _query_secondary=False, _raise_on_empty=False,
+            **params)
         if not items:
             defaults.update(params)
-            return cls(**defaults).save(), True
+            return cls(**defaults).save(request=request), True
         elif len(items) > 1:
             raise JHTTPBadRequest('Bad or Insufficient Params')
         else:
@@ -702,16 +735,48 @@ class BaseDocument(with_metaclass(
         return self._created
 
 
-def _cleaned_query_params(cls, params, strict):
-    params = {
-        key: val for key, val in params.items()
-        if not key.startswith('__') and val != '_all'
-    }
+class BaseDocument(with_metaclass(
+        DocTypeMeta,
+        MultiEngineDocMixin, BaseMixin, VersionedMixin, SyncRelatedMixin,
+        DocType)):
+    __abstract__ = True
 
-    # XXX support field__bool and field__in/field__all queries?
-    # process_lists(params)
-    process_bools(params)
+    @classmethod
+    def _is_abstract(cls):
+        return cls.__dict__.get('__abstract__', False)
 
+    def save(self, request=None, refresh=True, **kwargs):
+        self._populate_meta_id()
+        super(BaseDocument, self).save(refresh=refresh, **kwargs)
+        self._populate_id_field()
+        return self
+
+    def _update(self, params):
+        pk_field = self.pk_field()
+        iter_types = (DictField, ListField)
+        iter_fields = [
+            field for field in self._doc_type.mapping
+            if isinstance(self._doc_type.mapping[field], iter_types)]
+
+        for key, value in params.items():
+            if key == pk_field:
+                continue
+            if key in iter_fields:
+                self.update_iterables(value, key, unique=True, save=False)
+            else:
+                setattr(self, key, value)
+
+    def update(self, params, **kw):
+        process_bools(params)
+        _validate_fields(self.__class__, params.keys())
+        self._update(params)
+        return self.save(**kw)
+
+    def delete(self, request=None):
+        super(BaseDocument, self).delete()
+
+
+def _clean_query_params(cls, params, strict):
     if strict:
         _validate_fields(cls, params.keys())
     else:
@@ -720,17 +785,19 @@ def _cleaned_query_params(cls, params, strict):
         invalid_params = param_names.difference(field_names)
         for key in invalid_params:
             del params[key]
-
     return params
 
 
-def _restructure_params(cls, params):
+def _rename_pk_param(cls, params):
     pk_field = cls.pk_field()
     if pk_field in params:
         field_obj = cls._doc_type.mapping[pk_field]
         if isinstance(field_obj, IdField):
             params['_id'] = params.pop(pk_field)
+    return params
 
+
+def _restructure_params(params):
     for field, param in params.items():
         if not isinstance(param, list):
             params[field] = [param]

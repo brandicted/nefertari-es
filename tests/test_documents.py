@@ -12,7 +12,7 @@ from nefertari_es import documents as docs
 from nefertari_es import fields
 
 
-class TestBaseDocument(object):
+class TestBaseMixin(object):
 
     def test_comparison(self, simple_model):
         item1 = simple_model(name=None)
@@ -35,12 +35,22 @@ class TestBaseDocument(object):
         item2.name = '1'
         assert item2 in items
 
-    def test_sync_id_field(self, id_model):
+    def test_populate_id_field(self, id_model):
         item = id_model()
         assert item.id is None
         item._id = 123
-        item._sync_id_field()
+        item._populate_id_field()
         assert item.id == '123'
+
+    def test_populate_meta_id(self, simple_model):
+        item = simple_model()
+        assert item.meta.to_dict() == {}
+        item._populate_meta_id()
+        assert item.meta.to_dict() == {}
+        item.name = 'foo'
+        assert item.meta.to_dict() == {}
+        item._populate_meta_id()
+        assert item.meta.to_dict() == {'id': 'foo'}
 
     def test_setattr_readme_id(self, id_model):
         item = id_model()
@@ -63,9 +73,9 @@ class TestBaseDocument(object):
     @patch('nefertari_es.documents.BaseDocument._load_related')
     def test_getattr_raw(self, mock_load, story_model):
         story = story_model(author=1)
-        assert mock_load.call_count == 1
+        assert mock_load.call_count == 2
         assert story._getattr_raw('author') == 1
-        assert mock_load.call_count == 1
+        assert mock_load.call_count == 2
 
     @patch('nefertari_es.documents.BaseDocument._load_related')
     def test_unload_related(self, mock_load, parent_model, person_model):
@@ -95,21 +105,29 @@ class TestBaseDocument(object):
 
     def test_load_related(self, parent_model, person_model):
         parent = parent_model()
-        parent.children = ['123']
         with patch.object(person_model, 'get_collection') as mock_get:
             mock_get.return_value = ['foo']
+            parent.children = ['123']
+            mock_get.assert_called_with(_query_secondary=False, name=['123'])
+            mock_get.return_value = ['bar']
             parent._load_related('children')
-            mock_get.assert_called_once_with(name=['123'])
-            assert parent.children == ['foo']
+            mock_get.assert_called_with(
+                _query_secondary=False, name=['foo'])
+            assert mock_get.call_count == 2
+            assert parent.children == ['bar']
 
     def test_load_related_no_items(self, parent_model, person_model):
         parent = parent_model()
-        parent.children = ['123']
         with patch.object(person_model, 'get_collection') as mock_get:
             mock_get.return_value = []
+            parent.children = ['123']
+            mock_get.assert_called_with(_query_secondary=False, name=['123'])
+            mock_get.return_value = ['321']
             parent._load_related('children')
-            mock_get.assert_called_once_with(name=['123'])
-            assert parent.children == ['123']
+            mock_get.assert_called_with(
+                _query_secondary=False, name=['123'])
+            assert mock_get.call_count == 2
+            assert parent.children == ['321']
 
     def test_load_related_no_curr_value(
             self, parent_model, person_model):
@@ -120,34 +138,6 @@ class TestBaseDocument(object):
             parent._load_related('children')
             assert not mock_get.called
             assert parent.children == []
-
-    def test_save(self, person_model):
-        person = person_model(name='foo')
-        person._sync_id_field = Mock()
-        person.save()
-        person._sync_id_field.assert_called_once_with()
-
-    def test_update(self, simple_model):
-        item = simple_model(name='foo', price=123)
-        assert item.name == 'foo'
-        assert item.price == 123
-        item.save = Mock()
-        item.update({'name': 'bar', 'price': 321}, zoo=1)
-        assert item.name == 'foo'
-        assert item.price == 321
-        item.save.assert_called_once_with(zoo=1)
-
-    def test_update(self):
-        class MyModel(docs.BaseDocument):
-            id = fields.IdField(primary_key=True)
-            name = fields.StringField()
-            settings = fields.DictField()
-        MyModel.save = Mock()
-
-        myobj = MyModel(id=4, name='foo')
-        myobj.update({'name': 'bar', 'settings': {'sett1': 'val1'}})
-        assert myobj.name == 'bar'
-        assert myobj.settings == {'sett1': 'val1'}
 
     def test_to_dict(self, simple_model):
         item = simple_model(name='joe', price=42)
@@ -268,6 +258,31 @@ class TestBaseDocument(object):
             'author': 'Stephen King',
             'tags': ['novel']}
 
+    def test_get_fields_creators(self):
+        class Department(docs.BaseDocument):
+            __tablename__ = 'department'
+            id = fields.IdField(primary_key=True)
+            company_id = fields.ForeignKeyField(
+                ref_document='Company', ref_column='company.id',
+                ref_column_type=fields.IdField)
+
+        class Company(docs.BaseDocument):
+            __tablename__ = 'company'
+            id = fields.IdField(primary_key=True)
+            departments = fields.Relationship(
+                document='Department', backref_name='company')
+
+        dep_fields = Department._get_fields_creators()
+        assert set(dep_fields.keys()) == {
+            'id', 'version', 'company_id'}
+        assert dep_fields['id'] is fields.IdField
+        assert dep_fields['company_id'] is fields.ForeignKeyField
+
+        parent_fields = Company._get_fields_creators()
+        assert set(parent_fields.keys()) == {'id', 'version', 'departments'}
+        assert parent_fields['id'] is fields.IdField
+        assert parent_fields['departments'] is fields.Relationship
+
     def test_relationships_method(self, story_model):
         assert set(story_model._relationships()) == {'author', 'tags'}
 
@@ -355,7 +370,8 @@ class TestBaseDocument(object):
             foo=1, defaults={'bar': 2})
         assert obj == 123
         assert not created
-        mock_get.assert_called_once_with(foo=1, _raise_on_empty=False)
+        mock_get.assert_called_once_with(
+            _query_secondary=False, foo=1, _raise_on_empty=False)
 
     @patch('nefertari_es.documents.BaseDocument.get_collection')
     def test_get_or_create_found_multiple(self, mock_get, simple_model):
@@ -363,7 +379,8 @@ class TestBaseDocument(object):
         with pytest.raises(JHTTPBadRequest) as ex:
             simple_model.get_or_create(foo=1, defaults={'bar': 2})
         assert 'Bad or Insufficient Params' in str(ex.value)
-        mock_get.assert_called_once_with(foo=1, _raise_on_empty=False)
+        mock_get.assert_called_once_with(
+            _query_secondary=False, foo=1, _raise_on_empty=False)
 
     @patch('nefertari_es.documents.DocType.save')
     @patch('nefertari_es.documents.BaseDocument.get_collection')
@@ -373,7 +390,8 @@ class TestBaseDocument(object):
         obj, created = simple_model.get_or_create(
             name='foo', defaults={'price': 123})
         mock_get.assert_called_once_with(
-            name='foo', _raise_on_empty=False)
+            name='foo', _raise_on_empty=False,
+            _query_secondary=False)
         assert created
         assert obj.name == 'foo'
         assert obj.price == 123
@@ -464,34 +482,80 @@ class TestBaseDocument(object):
         assert not item._is_created()
 
 
+class TestBaseDocument(object):
+    def test_is_abstract(self, simple_model):
+        assert not simple_model._is_abstract()
+
+        class Foo(simple_model):
+            __abstract__ = True
+
+        assert Foo._is_abstract()
+
+        class Bar(Foo):
+            barbar = fields.StringField(primary_key=True)
+
+        assert not Bar._is_abstract()
+
+    def test_save(self, person_model):
+        person = person_model(name='foo')
+        person._populate_id_field = Mock()
+        person.save()
+        person._populate_id_field.assert_called_once_with()
+
+    def test_update(self, simple_model):
+        item = simple_model(name='foo', price=123)
+        assert item.name == 'foo'
+        assert item.price == 123
+        item.save = Mock()
+        item.update({'name': 'bar', 'price': 321}, zoo=1)
+        assert item.name == 'foo'
+        assert item.price == 321
+        item.save.assert_called_once_with(zoo=1)
+
+    def test_update_with_iterable(self):
+        class MyModel(docs.BaseDocument):
+            id = fields.IdField(primary_key=True)
+            name = fields.StringField()
+            settings = fields.DictField()
+        MyModel.save = Mock()
+
+        myobj = MyModel(id=4, name='foo')
+        myobj.update({'name': 'bar', 'settings': {'sett1': 'val1'}})
+        assert myobj.name == 'bar'
+        assert myobj.settings == {'sett1': 'val1'}
+
+
+
 class TestHelpers(object):
     @patch('nefertari_es.documents._validate_fields')
-    def test_cleaned_query_params_strict(self, mock_val, simple_model):
+    def test_clean_query_params_strict(self, mock_val, simple_model):
         params = {
             'name': 'user12',
             'foobar': 'user12',
-            '__id': 2,
             'price': '_all',
         }
-        cleaned = docs._cleaned_query_params(simple_model, params, True)
-        expected = {'name': 'user12', 'foobar': 'user12'}
-        assert cleaned == expected
-        mock_val.assert_called_once_with(simple_model, expected.keys())
+        cleaned = docs._clean_query_params(simple_model, params, True)
+        assert cleaned == params
+        mock_val.assert_called_once_with(simple_model, params.keys())
 
-    def test_cleaned_query_params_not_strict(self, simple_model):
+    def test_clean_query_params_not_strict(self, simple_model):
         params = {
             'name': 'user12',
             'foobar': 'user12',
-            '__id': 2,
             'price': '_all',
         }
-        cleaned = docs._cleaned_query_params(simple_model, params, False)
-        assert cleaned == {'name': 'user12'}
+        cleaned = docs._clean_query_params(simple_model, params, False)
+        assert cleaned == {'name': 'user12', 'price': '_all'}
 
-    def test_restructure_params(self, id_model):
+    def test_rename_pk_param(self, id_model):
         params = {'id': 'foo', 'name': 1}
-        assert docs._restructure_params(id_model, params) == {
-            '_id': ['foo'], 'name': [1]}
+        assert docs._rename_pk_param(id_model, params) == {
+            '_id': 'foo', 'name': 1}
+
+    def test_restructure_params(self):
+        params = {'id': 'foo', 'name': 1}
+        assert docs._restructure_params(params) == {
+            'id': ['foo'], 'name': [1]}
 
     def test_validate_fields_valid(self, simple_model):
         try:
@@ -589,7 +653,7 @@ class TestGetCollection(object):
             'fields': 'name,-price',
         }
 
-    @patch('nefertari_es.documents._cleaned_query_params')
+    @patch('nefertari_es.documents._clean_query_params')
     def test_params_param(self, mock_clean, mock_search, simple_model):
         mock_clean.return_value = {'foo': 1}
         result = simple_model.get_collection(foo=2)
@@ -643,7 +707,10 @@ class TestSyncRelatedMixin(object):
         item._load_related = Mock()
         item._sync_related = Mock()
         item.author = 1
-        item._load_related.assert_called_once_with('author')
+        item._load_related.assert_has_calls([
+            call('author', container={'author': 1}),
+            call('author'),
+        ])
         item._sync_related.assert_called_once_with(
             new_value=1, old_value=None, field_name='author')
 
