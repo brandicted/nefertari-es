@@ -51,6 +51,13 @@ class IdField(CustomMappingMixin, BaseFieldMixin, field.String):
     def _empty(self):
         return None
 
+    def _to_python(self, data):
+        try:
+            data = str(data)
+        except:
+            pass
+        return super(IdField, self)._to_python(data)
+
 
 class IntervalField(BaseFieldMixin, field.Integer):
     """ Custom field that stores `datetime.timedelta` instances.
@@ -168,6 +175,7 @@ class ReferenceField(BaseFieldMixin, field.String):
     _backref_prefix = 'backref_'
     _coerce = False
     _back_populates = None
+    _is_backref = False
     _valid_kwargs = ('required', 'multi')
 
     def __init__(self, doc_class, *args, **kwargs):
@@ -235,6 +243,8 @@ class ChoiceField(BaseFieldMixin, field.String):
 
 
 class PickleField(BaseFieldMixin, field.String):
+    _coerce = True
+
     def _to_python(self, data):
         if not data:
             return data
