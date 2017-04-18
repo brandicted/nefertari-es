@@ -15,6 +15,11 @@ class CustomMappingMixin(object):
     """
     _custom_mapping = None
 
+    def __init__(self, *args, **kwargs):
+        if 'mapping' in kwargs:
+            self._custom_mapping = kwargs.pop('mapping')
+        super(CustomMappingMixin, self).__init__(*args, **kwargs)
+
     def to_dict(self, *args, **kwargs):
         data = super(CustomMappingMixin, self).to_dict(*args, **kwargs)
         if self._custom_mapping is not None:
@@ -51,8 +56,15 @@ class IdField(CustomMappingMixin, BaseFieldMixin, field.String):
     def _empty(self):
         return None
 
+    def _to_python(self, data):
+        try:
+            data = str(data)
+        except:
+            pass
+        return super(IdField, self)._to_python(data)
 
-class IntervalField(BaseFieldMixin, field.Integer):
+
+class IntervalField(CustomMappingMixin, BaseFieldMixin, field.Integer):
     """ Custom field that stores `datetime.timedelta` instances.
 
     Values are stored as seconds in ES and loaded by
@@ -120,47 +132,47 @@ class TimeField(CustomMappingMixin, BaseFieldMixin, field.Field):
                 'Could not parse time from the value (%r)' % data, e)
 
 
-class IntegerField(BaseFieldMixin, field.Integer):
+class IntegerField(CustomMappingMixin, BaseFieldMixin, field.Integer):
     pass
 
 
-class SmallIntegerField(BaseFieldMixin, field.Integer):
+class SmallIntegerField(CustomMappingMixin, BaseFieldMixin, field.Integer):
     pass
 
 
-class StringField(BaseFieldMixin, field.String):
+class StringField(CustomMappingMixin, BaseFieldMixin, field.String):
     pass
 
 
-class TextField(BaseFieldMixin, field.String):
+class TextField(CustomMappingMixin, BaseFieldMixin, field.String):
     pass
 
 
-class UnicodeField(BaseFieldMixin, field.String):
+class UnicodeField(CustomMappingMixin, BaseFieldMixin, field.String):
     pass
 
 
-class UnicodeTextField(BaseFieldMixin, field.String):
+class UnicodeTextField(CustomMappingMixin, BaseFieldMixin, field.String):
     pass
 
 
-class BigIntegerField(BaseFieldMixin, field.Long):
+class BigIntegerField(CustomMappingMixin, BaseFieldMixin, field.Long):
     pass
 
 
-class BooleanField(BaseFieldMixin, field.Boolean):
+class BooleanField(CustomMappingMixin, BaseFieldMixin, field.Boolean):
     pass
 
 
-class FloatField(BaseFieldMixin, field.Float):
+class FloatField(CustomMappingMixin, BaseFieldMixin, field.Float):
     pass
 
 
-class BinaryField(BaseFieldMixin, field.Byte):
+class BinaryField(CustomMappingMixin, BaseFieldMixin, field.Byte):
     pass
 
 
-class DecimalField(BaseFieldMixin, field.Double):
+class DecimalField(CustomMappingMixin, BaseFieldMixin, field.Double):
     pass
 
 
@@ -168,6 +180,7 @@ class ReferenceField(BaseFieldMixin, field.String):
     _backref_prefix = 'backref_'
     _coerce = False
     _back_populates = None
+    _is_backref = False
     _valid_kwargs = ('required', 'multi')
 
     def __init__(self, doc_class, *args, **kwargs):
@@ -220,21 +233,23 @@ def Relationship(document, **kwargs):
 
 # Naive versions of fields needed to test example projects
 
-class ListField(BaseFieldMixin, field.String):
+class ListField(CustomMappingMixin, BaseFieldMixin, field.String):
     def __init__(self, *args, **kwargs):
         kwargs['multi'] = True
         super(ListField, self).__init__(*args, **kwargs)
 
 
-class ForeignKeyField(BaseFieldMixin, field.String):
+class ForeignKeyField(CustomMappingMixin, BaseFieldMixin, field.String):
     pass
 
 
-class ChoiceField(BaseFieldMixin, field.String):
+class ChoiceField(CustomMappingMixin, BaseFieldMixin, field.String):
     pass
 
 
-class PickleField(BaseFieldMixin, field.String):
+class PickleField(CustomMappingMixin, BaseFieldMixin, field.String):
+    _coerce = True
+
     def _to_python(self, data):
         if not data:
             return data

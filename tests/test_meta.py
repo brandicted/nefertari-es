@@ -88,7 +88,7 @@ class TestGenerateMetaMixin(object):
         assert FooBar._doc_type.name == 'FooBar'
 
 
-class TestBackrefGeneratingDocMeta(object):
+class TestBackrefGeneratingDocMixin(object):
 
     def test_backref_generation(self):
         class Tag(documents.BaseDocument):
@@ -106,7 +106,9 @@ class TestBackrefGeneratingDocMeta(object):
         tag_stories = Tag._doc_type.mapping['stories']
         assert isinstance(tag_stories, fields.ReferenceField)
         assert tag_stories._back_populates == 'tags'
+        assert tag_stories._is_backref
         assert tag_stories._doc_class is Story
 
         story_tags = Story._doc_type.mapping['tags']
         assert story_tags._back_populates == 'stories'
+        assert not story_tags._is_backref
